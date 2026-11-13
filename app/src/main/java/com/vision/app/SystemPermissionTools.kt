@@ -20,6 +20,7 @@ object SystemPermissionTools {
         put(d("get_location", "Get current GPS location (latitude, longitude)."))
         put(d("list_photos", "List recent photos in gallery."))
         put(d("read_contact_details", "Get a contact's number and email.", "name" to "Contact name"))
+        put(d("call_contact", "Find a saved contact and open the phone dialer. The user confirms by tapping Call.", "name" to "Contact name"))
     }
 
     suspend fun run(ctx: Context, name: String, args: JSONObject): String {
@@ -28,6 +29,7 @@ object SystemPermissionTools {
             "get_location" -> getLocation(ctx)
             "list_photos" -> listPhotos(ctx)
             "read_contact_details" -> readContact(ctx, args.optString("name"))
+            "call_contact" -> dialContact(ctx, args.optString("name"))
             else -> "Unknown tool: $name"
         }
     }
@@ -66,6 +68,40 @@ object SystemPermissionTools {
         val out = mutableListOf<String>()
         c?.use { while (it.moveToNext()) out.add(it.getString(0)) }
         return out.joinToString("\n")
+    }
+
+    private fun dialContact(ctx: Context, name: String): String {
+        if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED)
+            return "Contacts permission not granted. Enable it in Android settings."
+        val wanted = name.trim()
+        if (wanted.isBlank()) return "Tell me the contact name."
+        val cr = ctx.contentResolver
+        val matches = mutableListOf<Pair<String, String>>()
+        val c = cr.query(android.provider.ContactsContract.Contacts.CONTENT_URI,
+            arrayOf(android.provider.ContactsContract.Contacts._ID, android.provider.ContactsContract.Contacts.DISPLAY_NAME),
+            "${android.provider.ContactsContract.Contacts.DISPLAY_NAME} LIKE ?", arrayOf("%$wanted%"), null)
+        c?.use { cursor ->
+            while (cursor.moveToNext()) {
+                val id = cursor.getString(0)
+                val display = cursor.getString(1) ?: continue
+                val pc = cr.query(android.provider.ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                    arrayOf(android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER),
+                    "${android.provider.ContactsContract.CommonDataKinds.Phone.CONTACT_ID} = ?", arrayOf(id), null)
+                pc?.use { phones -> while (phones.moveToNext()) {
+                    val number = phones.getString(0)?.trim().orEmpty()
+                    if (number.isNotBlank()) matches.add(display to number)
+                } }
+            }
+        }
+        if (matches.isEmpty()) return "No phone number found for $wanted."
+        val distinct = matches.distinctBy { it.second }
+        if (distinct.size > 1) return "More than one number matches. Say the exact contact name."
+        return try {
+            val dial = android.content.Intent(android.content.Intent.ACTION_DIAL, android.net.Uri.fromParts("tel", distinct.first().second, null))
+                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            ctx.startActivity(dial)
+            "Dialer opened for " + distinct.first().first + ". Tap Call to place the call."
+        } catch (e: Exception) { "Could not open the dialer: ${e.message}" }
     }
 
     private fun readContact(ctx: Context, name: String): String {
