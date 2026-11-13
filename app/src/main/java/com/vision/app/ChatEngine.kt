@@ -14,11 +14,11 @@ import org.json.JSONObject
 object ChatEngine {
     private const val MODEL = "gemini-flash-latest" // change here for a specific model
     private const val URL = "https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent"
-    private val client = OkHttpClient()
+    private val client = OkHttpClient.Builder().connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS).readTimeout(35, java.util.concurrent.TimeUnit.SECONDS).writeTimeout(15, java.util.concurrent.TimeUnit.SECONDS).retryOnConnectionFailure(true).build()
 
     /** Answers the newest user message, which must already be in the shared history. */
     suspend fun reply(app: Context): String = withContext(Dispatchers.IO) {
-        val turns = MemoryStore.turns(60)
+        val turns = MemoryStore.turns(24)
         val lastUser = turns.lastOrNull { it.user }?.text.orEmpty()
         val lang = LanguageDetector.detectLanguage(lastUser)
         val system = Persona.PROMPT + Persona.TEXT_NOTE + "\n" + LanguageDetector.getLanguagePrompt(lang) +
@@ -26,7 +26,7 @@ object ChatEngine {
         val contents = buildContents(turns)
         val tools = JSONArray().put(JSONObject().put("functionDeclarations", ToolRouter.declarations()))
 
-        for (step in 0 until 6) {
+        for (step in 0 until 4) {
             val body = JSONObject()
                 .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system))))
                 .put("contents", contents)
@@ -69,7 +69,7 @@ object ChatEngine {
                 responses.put(JSONObject().put("inlineData", JSONObject().put("mimeType", "image/jpeg").put("data", b64)))
             }
             contents.put(JSONObject().put("role", "user").put("parts", responses))
-            if (step == 5) break
+            if (step == 3) break
         }
         "I used up my tool steps for this message. Please ask again in a shorter way."
     }
@@ -140,7 +140,7 @@ object ChatEngine {
             val contents = JSONArray().put(JSONObject().put("role", "user")
                 .put("parts", JSONArray().put(JSONObject().put("text", userText))))
             val tools = JSONArray().put(JSONObject().put("functionDeclarations", ToolRouter.declarations()))
-            for (step in 0 until maxRounds) {
+            for (step in 0 until maxRounds.coerceIn(1, 4)) {
                 val body = JSONObject()
                     .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system))))
                     .put("contents", contents)
