@@ -162,12 +162,12 @@ object ChatEngine {
                 for (c in calls) {
                     val name = c.optString("name")
                     val args = c.optJSONObject("args") ?: JSONObject()
-                    onTool(name, args)
                     var result = try {
                         ToolRouter.run(app, name, args)
                     } catch (e: Exception) {
                         "error: ${e.message}"
                     }
+                    if (!result.startsWith("error:", ignoreCase = true)) onTool(name, args)
                     if (result.startsWith("IMG:")) result = "Screenshots are not available here. Use read_screen."
                     responses.put(JSONObject().put("functionResponse", JSONObject()
                         .put("name", name)
