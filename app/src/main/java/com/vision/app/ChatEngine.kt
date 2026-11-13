@@ -50,10 +50,18 @@ object ChatEngine {
             contents.put(JSONObject().put("role", "model").put("parts", parts))
             val responses = JSONArray()
             val images = ArrayList<String>()
+            val executed = HashSet<String>()
             for (c in calls) {
                 val name = c.optString("name")
+                val args = c.optJSONObject("args") ?: JSONObject()
+                val fingerprint = name + ":" + args.toString()
+                if (!executed.add(fingerprint)) {
+                    responses.put(JSONObject().put("functionResponse", JSONObject()
+                        .put("name", name).put("response", JSONObject().put("result", "Skipped duplicate tool call in this turn."))))
+                    continue
+                }
                 var result = try {
-                    ToolRouter.run(app, name, c.optJSONObject("args") ?: JSONObject())
+                    ToolRouter.run(app, name, args)
                 } catch (e: Exception) {
                     "error: ${e.message}"
                 }
@@ -161,7 +169,6 @@ object ChatEngine {
                 val responses = JSONArray()
                 for (c in calls) {
                     val name = c.optString("name")
-                    val args = c.optJSONObject("args") ?: JSONObject()
                     var result = try {
                         ToolRouter.run(app, name, args)
                     } catch (e: Exception) {
