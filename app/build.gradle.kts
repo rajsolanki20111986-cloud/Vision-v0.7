@@ -11,8 +11,8 @@ android {
         applicationId = "com.vision.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.4"
+        versionCode = 7
+        versionName = "0.7"
     }
     buildFeatures { compose = true }
     compileOptions {
