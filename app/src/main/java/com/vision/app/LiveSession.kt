@@ -145,10 +145,22 @@ class LiveSession(
     private fun runTools(calls: JSONArray) {
         scope.launch {
             val out = JSONArray()
+            val executed = HashSet<String>()
             for (i in 0 until calls.length()) {
                 val c = calls.getJSONObject(i)
+                val name = c.optString("name")
+                val args = c.optJSONObject("args") ?: JSONObject()
+                // Models can occasionally repeat a function call in one response. Never execute
+                // an identical action twice; return a harmless explanation for the duplicate.
+                val fingerprint = name + ":" + args.toString()
+                if (!executed.add(fingerprint)) {
+                    out.put(JSONObject().put("id", c.getString("id"))
+                        .put("name", name)
+                        .put("response", JSONObject().put("result", "Skipped duplicate tool call in this turn.")))
+                    continue
+                }
                 var result = try {
-                    ToolRouter.run(ctx, c.getString("name"), c.optJSONObject("args") ?: JSONObject())
+                    ToolRouter.run(ctx, name, args)
                 } catch (e: Exception) {
                     "error: ${e.message}"
                 }
@@ -161,7 +173,7 @@ class LiveSession(
                 }
                 out.put(JSONObject()
                     .put("id", c.getString("id"))
-                    .put("name", c.getString("name"))
+                    .put("name", name)
                     .put("response", JSONObject().put("result", result)))
             }
             ws?.send(JSONObject().put("toolResponse", JSONObject().put("functionResponses", out)).toString())
