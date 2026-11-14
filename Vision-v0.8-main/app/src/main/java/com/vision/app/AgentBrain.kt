@@ -98,3 +98,103 @@ object AgentBrain {
                 alert("I reached the reply limit for $title this hour, so I stopped answering. Last message: ${lastIncoming.take(120)}")
             }
             return
+        }
+
+        val reply: String = if (SafetyRules.isLocationRequest(lastIncoming)) {
+            "I can't share that, but I will tell him you asked."
+        } else {
+            val system = Persona.PROMPT + agentRules(mode, title, contact) + "\n\n" + MemoryStore.contextBlock(includeTurns = false)
+            val r = ChatEngine.agentComplete(system, lines.map { it.mine to it.text })
+            val text = r.getOrElse {
+                alert("I could not answer $title: ${it.message?.take(150)}")
+                return
+            }.trim()
+            if (text.isBlank() || text.contains("NO_REPLY")) {
+                unreplied[conv] = 0
+                AgentStore.note("$title: no reply needed (${lastIncoming.take(60)})")
+                return
+            }
+            text
+        }
+
+        SafetyRules.refusal(reply)?.let {
+            alert("I wrote a reply to $title but blocked it ($it). Please answer yourself: ${lastIncoming.take(120)}")
+            return
+        }
+        if (!send(ctx, h.action, reply)) {
+            alert("I could not send a reply to $title (the notification is gone or has no reply button). They wrote: ${lastIncoming.take(120)}")
+            return
+        }
+        sentTexts.getOrPut(conv) { java.util.Collections.synchronizedList(ArrayList()) }.also {
+            it.add(reply); while (it.size > 10) it.removeAt(0)
+        }
+        AgentStore.addLine(conv, true, reply)
+        AgentStore.markSent(conv)
+        unreplied[conv] = 0
+
+        val who = if (mode == Mode.KNOWN) title else "$title (unknown person)"
+        AgentStore.note("$who: «${lastIncoming.take(80)}» → «${reply.take(80)}»")
+        if (mode == Mode.UNKNOWN_ADDRESSED) {
+            alert("Unknown person \"$title\" wrote to me: ${lastIncoming.take(200)}\nI replied: $reply\nTell me if you want me to talk to them.")
+        } else {
+            MemoryStore.addTurn("text", false, "[Agent] $who: ${lastIncoming.take(200)}\n→ I replied: $reply")
+        }
+    }
+
+    private fun agentRules(mode: Mode, title: String, contact: AgentContact?): String {
+        val who = if (mode == Mode.KNOWN)
+            "You are replying to $title, a person he told you about." +
+                (contact?.note?.takeIf { it.isNotBlank() }?.let { " What he told you about them: $it" } ?: "")
+        else
+            "You are replying to \"$title\". He has told you nothing about this person, so you do not know them. " +
+                "Be polite. Say you are Vision, his AI assistant, that you have no information about them, ask who they are " +
+                "and what they need, and say you will pass the message on to him. Tell them nothing about him."
+        return """
+
+AGENT MODE. He is not available and you answer a chat message for him now. You have no tools here.
+$who
+- Write ONLY the message text to send. One to three short, natural chat sentences, in the language the person used.
+- If asked whether you are an AI or a bot, say yes. Never say you are him.
+- Do not agree to meetings, promises, money, favours or secrets. Say you will check with him and tell him.
+- Never share his location, passwords, codes, bank or private details.
+- If the conversation has ended (for example "ok", "thanks", only an emoji) or there is nothing useful to say, answer exactly: NO_REPLY
+""".trimIndent()
+    }
+
+    private fun alert(text: String) {
+        AgentStore.note(text.lineSequence().first())
+        MemoryStore.addTurn("text", false, "[Agent] $text")
+    }
+
+    private fun addressed(text: String): Boolean {
+        val t = text.lowercase()
+        return AgentStore.triggers.any { t.contains(it) }
+    }
+
+    private fun findReply(n: Notification): Notification.Action? {
+        val acts = n.actions ?: return null
+        val withInput = acts.filter { a -> a.remoteInputs?.isNotEmpty() == true }
+        if (withInput.isEmpty()) return null
+        return withInput.firstOrNull { it.semanticAction == Notification.Action.SEMANTIC_ACTION_REPLY } ?: withInput.first()
+    }
+
+    /**
+     * The messages in this notification that are new and not from him. lastTs stops a message
+     * from being counted twice when the chat app reposts the notification.
+     */
+    @Suppress("DEPRECATION")
+    private fun newIncoming(extras: Bundle, conv: String, postTime: Long, fallbackText: String?): List<String> {
+        val seen = lastTs[conv] ?: 0L
+        val out = ArrayList<String>()
+        var newest = seen
+        val arr = extras.getParcelableArray(Notification.EXTRA_MESSAGES)
+        if (arr != null && arr.isNotEmpty()) {
+            for (m in Notification.MessagingStyle.Message.getMessagesFromBundleArray(arr)) {
+                val t = m.text?.toString()?.trim().orEmpty()
+                if (t.isEmpty() || m.timestamp <= seen) continue
+                if (m.timestamp > newest) newest = m.timestamp
+                if (m.sender == null && wasSentByUs(conv, t)) continue
+                out.add(t)
+            }
+        } else {
+            val t = fallbackText?.trim().orEmpty()
