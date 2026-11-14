@@ -98,3 +98,94 @@ class VisionAccessibilityService : AccessibilityService() {
         node.getBoundsInScreen(r)
         return if (tap(r.centerX(), r.centerY())) "Tapped $t by position" else "Could not tap $t"
     }
+
+    fun tap(x: Int, y: Int): Boolean {
+        val p = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
+        return dispatchGesture(
+            GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(p, 0, 60)).build(), null, null
+        )
+    }
+
+    /** Adds text after what is already in the field. If the app refuses, it pastes through the clipboard. */
+    fun typeText(t: String): String {
+        val root = rootInActiveWindow ?: return "No screen available"
+        val node = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: findEditable(root) ?: return "No input field found"
+        node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        val old = if (node.isShowingHintText) "" else node.text?.toString().orEmpty()
+        val args = Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, old + t)
+        }
+        if (node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) return "Typed"
+
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        cm.setPrimaryClip(ClipData.newPlainText("vision", t))
+        return if (node.performAction(AccessibilityNodeInfo.ACTION_PASTE)) "Pasted" else "Typing failed"
+    }
+
+    private fun findEditable(n: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+        if (n == null) return null
+        if (n.isEditable) return n
+        for (i in 0 until n.childCount) findEditable(n.getChild(i))?.let { return it }
+        return null
+    }
+
+    fun pressEnter(): String {
+        if (Build.VERSION.SDK_INT < 30) return "Enter key is not supported on this Android; tap the search or send button instead."
+        val node = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return "No focused input"
+        return if (node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)) "Enter pressed" else "Enter failed"
+    }
+
+    /** direction = which part of the content you want to see: "down" shows content further down. */
+    fun scroll(dir: String): String {
+        val m = resources.displayMetrics
+        val w = m.widthPixels
+        val h = m.heightPixels
+        val ok = when (dir) {
+            "down" -> swipe(w / 2, h * 7 / 10, w / 2, h * 3 / 10)
+            "up" -> swipe(w / 2, h * 3 / 10, w / 2, h * 7 / 10)
+            "right" -> swipe(w * 3 / 4, h / 2, w / 4, h / 2)
+            "left" -> swipe(w / 4, h / 2, w * 3 / 4, h / 2)
+            else -> false
+        }
+        return if (ok) "Scrolled $dir" else "Scroll failed"
+    }
+
+    private fun swipe(x1: Int, y1: Int, x2: Int, y2: Int): Boolean {
+        val p = Path().apply { moveTo(x1.toFloat(), y1.toFloat()); lineTo(x2.toFloat(), y2.toFloat()) }
+        return dispatchGesture(
+            GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(p, 0, 300)).build(), null, null
+        )
+    }
+
+    fun press(key: String): String {
+        val a = when (key) {
+            "back" -> GLOBAL_ACTION_BACK
+            "home" -> GLOBAL_ACTION_HOME
+            "recents" -> GLOBAL_ACTION_RECENTS
+            "notifications" -> GLOBAL_ACTION_NOTIFICATIONS
+            else -> return "Unknown key: $key"
+        }
+        return if (performGlobalAction(a)) "Done" else "Failed"
+    }
+
+    /** Screenshot as base64 JPEG. Needs Android 11+ and canTakeScreenshot in the service config. */
+    suspend fun captureJpegBase64(): String? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        return suspendCancellableCoroutine { cont ->
+            takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : AccessibilityService.TakeScreenshotCallback {
+                override fun onSuccess(result: AccessibilityService.ScreenshotResult) {
+                    val bmp = Bitmap.wrapHardwareBuffer(result.hardwareBuffer, result.colorSpace)
+                        ?.copy(Bitmap.Config.ARGB_8888, false)
+                    result.hardwareBuffer.close()
+                    val out = ByteArrayOutputStream()
+                    val ok = bmp?.compress(Bitmap.CompressFormat.JPEG, 70, out) == true
+                    cont.resume(if (ok) Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP) else null)
+                }
+
+                override fun onFailure(errorCode: Int) {
+                    cont.resume(null)
+                }
+            })
+        }
+    }
+}
