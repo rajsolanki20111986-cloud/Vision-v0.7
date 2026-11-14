@@ -122,3 +122,125 @@ object ToolRouter {
             ?: return "Accessibility service is not running. Ask him to enable Vision Control in Android Accessibility settings."
 
         return when (name) {
+        s.blockedReason()?.let { return it }
+
+        return when (name) {
+            "read_screen" -> s.readScreen()
+            "capture_screen" -> s.captureJpegBase64()?.let { "IMG:$it" }
+                ?: "Screenshot failed. It needs Android 11 or newer and an unlocked screen."
+            "tap_text" -> s.clickText(a.optString("text")).also { delay(400) }
+            "tap_xy" -> {
+                val x = a.optString("x").toDoubleOrNull()
+                val y = a.optString("y").toDoubleOrNull()
+                if (x == null || y == null) "Need x and y from read_screen."
+                else (if (s.tap(x.toInt(), y.toInt())) "Tapped" else "Tap failed").also { delay(400) }
+            }
+            "type_text" -> SafetyRules.refusal(a.optString("text")) ?: s.typeText(a.optString("text"))
+            "press_enter" -> s.pressEnter().also { delay(500) }
+            "scroll" -> s.scroll(a.optString("direction")).also { delay(350) }
+            "press_key" -> s.press(a.optString("key")).also { delay(400) }
+            else -> "Unknown tool: $name"
+        }
+    }
+
+    private fun memoryTool(name: String, a: JSONObject): String {
+        if (!Prefs.memoryOn) return "Memory is switched off in Vision settings."
+        return when (name) {
+            "memory_search" -> MemoryStore.search(a.optString("query"))
+            "memory_list" -> MemoryStore.list().joinToString("\n").ifBlank { "No memory files yet." }
+            "memory_read" -> MemoryStore.read(a.optString("path")) ?: "No such file: ${a.optString("path")}"
+            "memory_write" -> MemoryStore.write(a.optString("path"), a.optString("content"))
+            else -> MemoryStore.write(a.optString("path"), a.optString("content"), append = true)
+        }
+    }
+
+    private fun openApp(ctx: Context, name: String): String {
+        val pm = ctx.packageManager
+        val wanted = name.trim()
+        val apps = pm.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0)
+        val hit = apps.firstOrNull { it.loadLabel(pm).toString().equals(wanted, ignoreCase = true) }
+            ?: apps.firstOrNull { it.loadLabel(pm).toString().contains(wanted, ignoreCase = true) }
+            ?: apps.firstOrNull { it.activityInfo.packageName.contains(wanted, ignoreCase = true) }
+            ?: return "App not found: $name"
+        val i = pm.getLaunchIntentForPackage(hit.activityInfo.packageName) ?: return "Cannot launch $name"
+        return try {
+            ctx.startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            "Opened ${hit.loadLabel(pm)}. Call read_screen next."
+        } catch (e: Exception) {
+            "Launch blocked: ${e.message}. Allow 'Display over other apps' for Vision."
+        }
+    }
+
+    private fun openUrl(ctx: Context, url: String, pkg: String? = null): String {
+        val i = Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (pkg != null) i.setPackage(pkg)
+        return try {
+            ctx.startActivity(i)
+            "Opened. Call read_screen next."
+        } catch (e: Exception) {
+            "Could not open: ${e.message}. Allow 'Display over other apps' for Vision."
+        }
+    }
+
+    private fun media(ctx: Context, action: String): String {
+        val code = when (action) {
+            "play_pause" -> KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+            "next" -> KeyEvent.KEYCODE_MEDIA_NEXT
+            "previous" -> KeyEvent.KEYCODE_MEDIA_PREVIOUS
+            else -> return "Unknown action"
+        }
+        val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, code))
+        am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, code))
+        return "Done"
+    }
+
+    private fun volume(ctx: Context, dir: String): String {
+        val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        am.adjustStreamVolume(
+            AudioManager.STREAM_MUSIC,
+            if (dir == "up") AudioManager.ADJUST_RAISE else AudioManager.ADJUST_LOWER,
+            AudioManager.FLAG_SHOW_UI
+        )
+        return "Done"
+    }
+
+    private fun torch(ctx: Context, on: Boolean): String {
+        val cm = ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        return try {
+            val id = cm.cameraIdList.firstOrNull {
+                cm.getCameraCharacteristics(it).get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+            } ?: return "This phone has no flashlight."
+            cm.setTorchMode(id, on)
+            if (on) "Torch on" else "Torch off"
+        } catch (e: Exception) {
+            "Torch failed: ${e.message}"
+        }
+    }
+
+    private fun battery(ctx: Context): String {
+        val i = ctx.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            ?: return "Battery status unknown."
+        val level = i.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+        val scale = i.getIntExtra(BatteryManager.EXTRA_SCALE, 100).coerceAtLeast(1)
+        val status = i.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+        val charging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
+        return "Battery ${level * 100 / scale}%, ${if (charging) "charging" else "not charging"}."
+    }
+
+    private fun setAlarm(ctx: Context, h: Int, m: Int, label: String): String {
+        if (h !in 0..23 || m !in 0..59) return "Bad time. Use hour 0 to 23 and minute 0 to 59."
+        val i = Intent(AlarmClock.ACTION_SET_ALARM)
+            .putExtra(AlarmClock.EXTRA_HOUR, h)
+            .putExtra(AlarmClock.EXTRA_MINUTES, m)
+            .putExtra(AlarmClock.EXTRA_MESSAGE, label)
+            .putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        return try {
+            ctx.startActivity(i)
+            "Alarm set for %02d:%02d".format(h, m)
+        } catch (e: Exception) {
+            "No clock app handled the alarm: ${e.message}"
+        }
+    }
+}
