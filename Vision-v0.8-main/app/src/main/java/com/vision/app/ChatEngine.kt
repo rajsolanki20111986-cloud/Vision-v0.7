@@ -108,3 +108,144 @@ object ChatEngine {
      * One-shot reply for the agent: no tools, no shared history. history is (mine, text) pairs,
      * oldest first, ending with the other person's message. Returns the text to send.
      */
+    suspend fun agentComplete(system: String, history: List<Pair<Boolean, String>>): Result<String> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val groups = ArrayList<Pair<String, StringBuilder>>()
+                for ((mine, text) in history) {
+                    val role = if (mine) "model" else "user"
+                    val last = groups.lastOrNull()
+                    if (last != null && last.first == role) last.second.append('\n').append(text)
+                    else groups.add(role to StringBuilder(text))
+                }
+                val contents = JSONArray()
+                groups.forEach { (role, sb) ->
+                    contents.put(JSONObject().put("role", role)
+                        .put("parts", JSONArray().put(JSONObject().put("text", sb.toString()))))
+                }
+                while (contents.length() > 0 && contents.getJSONObject(0).optString("role") != "user") contents.remove(0)
+                if (contents.length() == 0) throw IllegalStateException("no message to answer")
+                val body = JSONObject()
+                    .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system))))
+                    .put("contents", contents)
+                val json = post(body).getOrThrow()
+                val parts = json.optJSONArray("candidates")?.optJSONObject(0)
+                    ?.optJSONObject("content")?.optJSONArray("parts")
+                    ?: throw IllegalStateException("empty answer from the model")
+                val out = StringBuilder()
+                for (i in 0 until parts.length()) out.append(parts.getJSONObject(i).optString("text", ""))
+                out.toString()
+            }
+        }
+
+    /**
+     * One task step for the live-chat agent: the model may call the phone tools several times
+     * and then gives a final text. Separate from the shared chat history. onTool sees each call.
+     */
+    suspend fun agentLoop(
+        app: Context, system: String, userText: String, maxRounds: Int,
+        onTool: (String, JSONObject) -> Unit
+    ): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val contents = JSONArray().put(JSONObject().put("role", "user")
+                .put("parts", JSONArray().put(JSONObject().put("text", userText))))
+            val tools = JSONArray().put(JSONObject().put("functionDeclarations", ToolRouter.declarations()))
+            for (step in 0 until maxRounds.coerceIn(1, 4)) {
+                val body = JSONObject()
+                    .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system))))
+                    .put("contents", contents)
+                    .put("tools", tools)
+                val json = post(body).getOrThrow()
+                val content = json.optJSONArray("candidates")?.optJSONObject(0)?.optJSONObject("content")
+                    ?: throw IllegalStateException("empty answer from the model")
+                val parts = content.optJSONArray("parts") ?: JSONArray()
+                val calls = ArrayList<JSONObject>()
+                val text = StringBuilder()
+                for (i in 0 until parts.length()) {
+                    val p = parts.getJSONObject(i)
+                    p.optJSONObject("functionCall")?.let { calls.add(it) }
+                    p.optString("text", "").takeIf { it.isNotEmpty() }?.let { text.append(it) }
+                }
+                if (calls.isEmpty()) return@runCatching text.toString().ifBlank { "WAIT" }
+                contents.put(JSONObject().put("role", "model").put("parts", parts))
+                val responses = JSONArray()
+                val executed = HashSet<String>()
+                for (c in calls) {
+                    val name = c.optString("name")
+                    val args = c.optJSONObject("args") ?: JSONObject()
+                    val fingerprint = name + ":" + args.toString()
+                    if (!executed.add(fingerprint)) {
+                        responses.put(JSONObject().put("functionResponse", JSONObject()
+                            .put("name", name).put("response", JSONObject().put("result", "Skipped duplicate tool call in this turn."))))
+                        continue
+                    }
+                    var result = try {
+                        ToolRouter.run(app, name, args)
+                    } catch (e: Exception) {
+                        "error: ${e.message}"
+                    }
+                    if (!result.startsWith("error:", ignoreCase = true)) onTool(name, args)
+                    if (result.startsWith("IMG:")) result = "Screenshots are not available here. Use read_screen."
+                    responses.put(JSONObject().put("functionResponse", JSONObject()
+                        .put("name", name)
+                        .put("response", JSONObject().put("result", result))))
+                }
+                contents.put(JSONObject().put("role", "user").put("parts", responses))
+            }
+            "WAIT"
+        }
+    }
+
+    /** Set to false the first time the model rejects thinkingConfig; after that it is not sent again. */
+    @Volatile private var thinkingOk = true
+
+    /**
+     * Low thinking makes replies and every tool step much faster (the default level is medium).
+     * If the chosen model refuses the setting, the same request is repeated once without it.
+     */
+    private fun post(body: JSONObject): Result<JSONObject> {
+        val gc = body.optJSONObject("generationConfig") ?: JSONObject().also { body.put("generationConfig", it) }
+        if (thinkingOk && !gc.has("thinkingConfig")) {
+            gc.put("thinkingConfig", JSONObject().put("thinkingLevel", "low"))
+        }
+        val first = rawPost(body)
+        val msg = first.exceptionOrNull()?.message.orEmpty()
+        if (first.isFailure && thinkingOk && msg.startsWith("Error 400") && msg.contains("think", ignoreCase = true)) {
+            thinkingOk = false
+            gc.remove("thinkingConfig")
+            return rawPost(body)
+        }
+        return first
+    }
+
+    /** One-shot call that returns JSON text; used by the memory keeper. No tools, no history. */
+    suspend fun extract(system: String, userText: String): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val body = JSONObject()
+                .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system))))
+                .put("contents", JSONArray().put(JSONObject().put("role", "user")
+                    .put("parts", JSONArray().put(JSONObject().put("text", userText)))))
+                .put("generationConfig", JSONObject().put("responseMimeType", "application/json"))
+            val json = post(body).getOrThrow()
+            val parts = json.optJSONArray("candidates")?.optJSONObject(0)
+                ?.optJSONObject("content")?.optJSONArray("parts")
+                ?: throw IllegalStateException("empty answer from the model")
+            val out = StringBuilder()
+            for (i in 0 until parts.length()) out.append(parts.getJSONObject(i).optString("text", ""))
+            out.toString()
+        }
+    }
+
+    private fun rawPost(body: JSONObject): Result<JSONObject> = runCatching {
+        val req = Request.Builder()
+            .url(URL)
+            .header("x-goog-api-key", Prefs.apiKey)
+            .post(body.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+        client.newCall(req).execute().use { r ->
+            val s = r.body?.string().orEmpty()
+            if (!r.isSuccessful) throw IllegalStateException("Error ${r.code}: ${s.take(500)}")
+            JSONObject(s)
+        }
+    }
+}
