@@ -198,3 +198,29 @@ $who
             }
         } else {
             val t = fallbackText?.trim().orEmpty()
+            if (t.isNotEmpty() && postTime > seen) {
+                newest = postTime
+                if (!wasSentByUs(conv, t)) out.add(t)
+            }
+        }
+        lastTs[conv] = newest
+        return out
+    }
+
+    private fun wasSentByUs(conv: String, text: String): Boolean = sentTexts[conv]?.contains(text) == true
+
+    private fun send(ctx: Context, action: Notification.Action, text: String): Boolean {
+        val inputs = action.remoteInputs
+        if (inputs == null || inputs.isEmpty()) return false
+        val intent = Intent()
+        val results = Bundle()
+        for (ri in inputs) results.putCharSequence(ri.resultKey, text)
+        RemoteInput.addResultsToIntent(inputs, intent, results)
+        return try {
+            (action.actionIntent ?: return false).send(ctx, 0, intent)
+            true
+        } catch (e: PendingIntent.CanceledException) {
+            false
+        }
+    }
+}
