@@ -120,8 +120,6 @@ object ToolRouter {
         // Everything below touches the screen: it needs the accessibility service and an unblocked app.
         val s = VisionAccessibilityService.inst
             ?: return "Accessibility service is not running. Ask him to enable Vision Control in Android Accessibility settings."
-
-        return when (name) {
         s.blockedReason()?.let { return it }
 
         return when (name) {
