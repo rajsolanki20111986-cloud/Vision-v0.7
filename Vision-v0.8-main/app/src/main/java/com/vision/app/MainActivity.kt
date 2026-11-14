@@ -158,3 +158,103 @@ fun VoiceScreen() {
         LiveState.Disconnected -> Color(0xFF555B66)
         LiveState.Connecting -> Color(0xFFFFB300)
         LiveState.Listening -> BLUE
+        LiveState.Speaking -> GOLD
+    }
+    val label = when (state) {
+        LiveState.Disconnected -> "Tap to wake Vision"
+        LiveState.Connecting -> "Connecting…"
+        LiveState.Listening -> "Listening"
+        LiveState.Speaking -> "Speaking"
+    }
+    val spin by rememberInfiniteTransition(label = "spin").animateFloat(
+        initialValue = 0f, targetValue = 360f,
+        animationSpec = infiniteRepeatable(tween(2400, easing = LinearEasing), RepeatMode.Restart),
+        label = "spin"
+    )
+
+    fun toggle() {
+        if (active) { ctx.stopService(Intent(ctx, VoiceService::class.java)); return }
+        if (Prefs.apiKey.isBlank()) { Toast.makeText(ctx, "Settings में Gemini API key डालो", Toast.LENGTH_LONG).show(); return }
+        if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            Toast.makeText(ctx, "माइक की permission दो", Toast.LENGTH_LONG).show(); return
+        }
+        ContextCompat.startForegroundService(ctx, Intent(ctx, VoiceService::class.java))
+    }
+
+    Column(
+        Modifier.fillMaxSize().padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Box(Modifier.size(240.dp), contentAlignment = Alignment.Center) {
+            // The blue arc turns while Vision is awake.
+            Canvas(Modifier.size(240.dp)) {
+                val stroke = 10.dp.toPx()
+                drawArc(
+                    color = BLUE.copy(alpha = if (active) 1f else 0.25f),
+                    startAngle = spin,
+                    sweepAngle = if (active) 200f else 70f,
+                    useCenter = false,
+                    topLeft = Offset(stroke / 2, stroke / 2),
+                    size = Size(size.width - stroke, size.height - stroke),
+                    style = Stroke(width = stroke, cap = StrokeCap.Round)
+                )
+            }
+            Box(
+                Modifier.size(170.dp).clip(CircleShape).background(color.copy(alpha = 0.22f)).clickable { toggle() },
+                contentAlignment = Alignment.Center
+            ) {
+                Box(Modifier.size(120.dp).clip(CircleShape).background(color), contentAlignment = Alignment.Center) {
+                    Text(if (active) "■" else "⏻", fontSize = 36.sp, color = Color.Black)
+                }
+            }
+        }
+        Spacer(Modifier.height(20.dp))
+        Text(label, color = color)
+        Spacer(Modifier.height(20.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(40.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                if (mic) "🎤" else "🚫", fontSize = 32.sp,
+                modifier = Modifier.clickable { VisionCore.micOn.value = !mic }.padding(10.dp)
+            )
+            Text(
+                if (speaker) "🔊" else "🔇", fontSize = 32.sp,
+                modifier = Modifier.clickable { VisionCore.speakerOn.value = !speaker }.padding(10.dp)
+            )
+        }
+        Spacer(Modifier.height(16.dp))
+        Text(caption, color = GREY, maxLines = 6)
+    }
+}
+
+// ---------------------------------------------------------------- Chat
+
+class ChatVM : ViewModel() {
+    val msgs = mutableStateListOf<Turn>()
+    var busy by mutableStateOf(false)
+
+    init { reload() }
+
+    /** Reloads from the shared history, so voice turns show up here too. */
+    fun reload() {
+        msgs.clear()
+        msgs.addAll(MemoryStore.turns(300))
+    }
+
+    fun send(app: Context, text: String) {
+        if (text.isBlank() || busy) return
+        MemoryStore.addTurn("text", true, text)
+        reload()
+        busy = true
+        viewModelScope.launch {
+            val r = try { ChatEngine.reply(app) } catch (e: Exception) { "Error: ${e.message}" }
+            MemoryStore.addTurn("text", false, r)
+            reload()
+            busy = false
+            MemoryKeeper.maybeRun()
+        }
+    }
+}
+
+fun speak(tts: TextToSpeech?, text: String) {
+    tts ?: return
