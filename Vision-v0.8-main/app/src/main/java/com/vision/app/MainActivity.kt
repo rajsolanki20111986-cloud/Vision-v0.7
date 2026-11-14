@@ -78,3 +78,83 @@ enum class Screen { VOICE, CHAT, SETTINGS, MEMORY }
 /** Permissions the features need. Asked once when the app opens. */
 fun neededPermissions(): Array<String> {
     val list = mutableListOf(
+        Manifest.permission.RECORD_AUDIO,
+        Manifest.permission.READ_CONTACTS,
+        Manifest.permission.CALL_PHONE,
+        Manifest.permission.ACCESS_FINE_LOCATION,
+    )
+    if (Build.VERSION.SDK_INT >= 33) {
+        list.add("android.permission.READ_MEDIA_IMAGES")
+        list.add(Manifest.permission.POST_NOTIFICATIONS)
+    } else {
+        list.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+    }
+    return list.toTypedArray()
+}
+
+@Composable
+fun VisionApp() {
+    var screen by remember { mutableStateOf(Screen.VOICE) }
+    val perms = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {}
+    LaunchedEffect(Unit) { perms.launch(neededPermissions()) }
+
+    MaterialTheme(colorScheme = darkColorScheme()) {
+        Scaffold(
+            containerColor = BG, contentColor = Color.White,
+            topBar = {
+                Row(
+                    Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (screen == Screen.SETTINGS || screen == Screen.MEMORY) {
+                        Text("←", fontSize = 24.sp, modifier = Modifier.clickable { screen = Screen.VOICE }.padding(8.dp))
+                    }
+                    Text(
+                        "V I S I O N", color = GOLD, fontSize = 16.sp, letterSpacing = 4.sp,
+                        modifier = Modifier.weight(1f).padding(start = 8.dp)
+                    )
+                    Text("🧠", fontSize = 22.sp, modifier = Modifier.clickable { screen = Screen.MEMORY }.padding(8.dp))
+                    Text("⚙", fontSize = 22.sp, modifier = Modifier.clickable { screen = Screen.SETTINGS }.padding(8.dp))
+                }
+            },
+            bottomBar = {
+                if (screen == Screen.VOICE || screen == Screen.CHAT) {
+                    NavigationBar {
+                        listOf(Triple(Screen.VOICE, "🎙", "Voice"), Triple(Screen.CHAT, "💬", "Chat"))
+                            .forEach { (s, icon, name) ->
+                                NavigationBarItem(
+                                    selected = screen == s, onClick = { screen = s },
+                                    icon = { Text(icon) }, label = { Text(name) }
+                                )
+                            }
+                    }
+                }
+            }
+        ) { pad ->
+            Box(Modifier.padding(pad).fillMaxSize()) {
+                when (screen) {
+                    Screen.VOICE -> VoiceScreen()
+                    Screen.CHAT -> ChatScreen()
+                    Screen.SETTINGS -> SettingsScreen()
+                    Screen.MEMORY -> MemoryScreen()
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------- Voice
+
+@Composable
+fun VoiceScreen() {
+    val ctx = LocalContext.current
+    val state by VisionCore.state.collectAsState()
+    val caption by VisionCore.caption.collectAsState()
+    val mic by VisionCore.micOn.collectAsState()
+    val speaker by VisionCore.speakerOn.collectAsState()
+
+    val active = state != LiveState.Disconnected
+    val color = when (state) {
+        LiveState.Disconnected -> Color(0xFF555B66)
+        LiveState.Connecting -> Color(0xFFFFB300)
+        LiveState.Listening -> BLUE
