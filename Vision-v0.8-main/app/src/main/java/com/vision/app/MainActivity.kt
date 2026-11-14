@@ -358,3 +358,135 @@ fun SettingsScreen() {
     var control by remember { mutableStateOf(Prefs.controlEnabled) }
     var memory by remember { mutableStateOf(Prefs.memoryOn) }
     var notify by remember { mutableStateOf(Prefs.notifyAlerts) }
+    var agent by remember { mutableStateOf(Prefs.agentOn) }
+    var gmail by remember { mutableStateOf(Prefs.gmailEnabled) }
+    var gmailToken by remember { mutableStateOf(Prefs.gmailToken) }
+    val connected = VisionAccessibilityService.inst != null
+
+    Column(
+        Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text("Settings", fontSize = 22.sp)
+        OutlinedTextField(
+            key, { key = it; Prefs.apiKey = it }, Modifier.fillMaxWidth(),
+            label = { Text("Gemini API key") }, singleLine = true,
+            visualTransformation = PasswordVisualTransformation()
+        )
+        OutlinedTextField(
+            voice, { voice = it; Prefs.voice = it }, Modifier.fillMaxWidth(),
+            label = { Text("Voice (Charon, Puck, Kore, Fenrir, Orus…)") }, singleLine = true
+        )
+        HorizontalDivider()
+        ToggleRow(
+            "Phone control",
+            if (connected) "Accessibility connected" else "Accessibility not enabled yet",
+            control
+        ) { control = it; Prefs.controlEnabled = it }
+        ToggleRow(
+            "Memory",
+            "Vision reads and saves memory files and the shared history",
+            memory
+        ) { memory = it; Prefs.memoryOn = it }
+        ToggleRow(
+            "Message alerts",
+            "Tell me about WhatsApp, Telegram, Instagram and SMS messages (needs notification access)",
+            notify
+        ) { notify = it; Prefs.notifyAlerts = it }
+        ToggleRow(
+            "Agent mode",
+            "Vision answers chat messages by itself for the people you named, also in the background (needs notification access)",
+            agent
+        ) { agent = it; Prefs.agentOn = it }
+        ToggleRow(
+            "Gmail API",
+            "Search your mail (read only) with the access token below",
+            gmail
+        ) { gmail = it; Prefs.gmailEnabled = it }
+        if (gmail) {
+            OutlinedTextField(
+                gmailToken, { gmailToken = it; Prefs.gmailToken = it }, Modifier.fillMaxWidth(),
+                label = { Text("Gmail OAuth access token") }, singleLine = true,
+                visualTransformation = PasswordVisualTransformation()
+            )
+        }
+        HorizontalDivider()
+        Button({ ctx.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }) { Text("Open Accessibility settings") }
+        Button({
+            ctx.startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + ctx.packageName)))
+        }) { Text("Allow launching apps (Display over other apps)") }
+        Button({ ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }) {
+            Text("Notification access")
+        }
+    }
+}
+
+// ---------------------------------------------------------------- Memory
+
+@Composable
+fun MemoryScreen() {
+    var files by remember { mutableStateOf(MemoryStore.list()) }
+    var openPath by remember { mutableStateOf<String?>(null) }
+    var content by remember { mutableStateOf("") }
+    var newPath by remember { mutableStateOf("") }
+    var status by remember { mutableStateOf("") }
+
+    Column(
+        Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        val path = openPath
+        if (path == null) {
+            Text("Memory", fontSize = 22.sp)
+            Text(
+                "Vision reads these every time it talks. You can edit or delete any file. " +
+                    "Folders: facts, routines, projects, skills (things you taught it).",
+                fontSize = 12.sp, color = GREY
+            )
+            files.forEach { f ->
+                Text(
+                    f,
+                    modifier = Modifier.fillMaxWidth().background(CARD).clickable {
+                        content = MemoryStore.read(f).orEmpty()
+                        openPath = f
+                    }.padding(12.dp)
+                )
+            }
+            if (files.isEmpty()) Text("No files yet.", color = GREY)
+            HorizontalDivider()
+            OutlinedTextField(
+                newPath, { newPath = it }, Modifier.fillMaxWidth(),
+                label = { Text("New file, e.g. facts/favourite-food.md") }, singleLine = true
+            )
+            Button({
+                val res = MemoryStore.write(newPath, "")
+                status = res
+                if (res.startsWith("Saved")) {
+                    content = ""
+                    openPath = newPath.trim().trimStart('/')
+                }
+                files = MemoryStore.list()
+            }) { Text("Create") }
+        } else {
+            Text(path, color = GOLD)
+            OutlinedTextField(
+                content, { content = it }, Modifier.fillMaxWidth().heightIn(min = 320.dp),
+                label = { Text("Content") }
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button({
+                    status = MemoryStore.write(path, content)
+                    files = MemoryStore.list()
+                    openPath = null
+                }) { Text("Save") }
+                Button({
+                    status = MemoryStore.delete(path)
+                    files = MemoryStore.list()
+                    openPath = null
+                }) { Text("Delete") }
+                Button({ openPath = null }) { Text("Back") }
+            }
+        }
+        if (status.isNotBlank()) Text(status, color = GREY, fontSize = 12.sp)
+    }
+}
