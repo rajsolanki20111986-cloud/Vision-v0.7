@@ -218,3 +218,88 @@ object MemoryStore {
         if (!::root.isInitialized) return "No memory yet."
         return synchronized(lock) {
             val hits = rank(query, limit.coerceIn(1, 12))
+            if (hits.isEmpty()) "Nothing in memory matches: $query"
+            else hits.joinToString("\n") { "[${it.first.path}] ${it.first.text}" }
+        }
+    }
+
+    private fun recentUserText(): String =
+        turns(12).filter { it.user }.takeLast(3).joinToString(" ") { it.text.take(300) }
+
+    /** A short picture of what is already known; the keeper uses it so it does not repeat facts. */
+    fun knownSummary(): String {
+        if (!::root.isInitialized) return ""
+        return synchronized(lock) {
+            val sb = StringBuilder()
+            read("profile.md")?.let { sb.append(it.take(1000)).append('\n') }
+            for (p in list()) {
+                if (p == "profile.md") continue
+                val first = (read(p) ?: "").lines().map { it.trim() }
+                    .filter { it.isNotEmpty() && !it.startsWith("#") }.take(4)
+                sb.append('[').append(p).append("] ").append(first.joinToString(" | ").take(300)).append('\n')
+                if (sb.length > 3500) break
+            }
+            sb.toString()
+        }
+    }
+
+    /**
+     * Memory text added to the system prompt of voice and text. About 7,000 characters at most:
+     * profile and skills always, then only the lines that match the current topic, then a file index.
+     */
+    fun contextBlock(includeTurns: Boolean, query: String = ""): String {
+        if (!Prefs.memoryOn || !::root.isInitialized) return ""
+        val q = query.ifBlank { recentUserText() }
+        val sb = StringBuilder()
+        sb.append("MEMORY (already loaded for you, so do not call memory_list or memory_read for what is shown here). ")
+        sb.append("The lines below were picked by topic from the current conversation. For anything else call memory_search once. ")
+        sb.append("A background keeper saves lasting facts by itself; when he says remember this, also save it with memory_append. ")
+        sb.append("Files under skills/ are procedures he taught you; follow them.\n")
+        synchronized(lock) {
+            val shown = HashSet<String>()
+            shown.add("profile.md")
+            read("profile.md")?.trim()?.takeIf { it.length > 10 }?.let {
+                sb.append("\n--- profile.md ---\n").append(it.take(1500)).append('\n')
+            }
+            var skillBudget = 2500
+            for (p in list().filter { it.startsWith("skills/") }) {
+                if (skillBudget <= 0) break
+                val body = read(p).orEmpty().take(skillBudget)
+                skillBudget -= body.length
+                sb.append("\n--- ").append(p).append(" ---\n").append(body).append('\n')
+                shown.add(p)
+            }
+            val hits = rank(q, 14).filter { it.first.path !in shown }
+            if (hits.isNotEmpty()) {
+                sb.append("\nRELEVANT MEMORY (matched to the current topic):\n")
+                var b = 2200
+                for (h in hits) {
+                    val line = "- [${h.first.path}] ${h.first.text}\n"
+                    if (line.length > b) break
+                    b -= line.length
+                    sb.append(line)
+                }
+            }
+            val others = list().filter { it !in shown }
+            if (others.isNotEmpty()) {
+                sb.append("\nOTHER MEMORY FILES (find with memory_search, open with memory_read):\n")
+                var b = 1200
+                for (p in others) {
+                    val line = "- $p\n"
+                    if (line.length > b) break
+                    b -= line.length
+                    sb.append(line)
+                }
+            }
+        }
+        if (includeTurns) {
+            sb.append("\nRECENT CONVERSATION (voice and text share this history; [voice] means it was spoken):\n")
+            turns(16).forEach { t ->
+                sb.append(if (t.user) "User" else "Vision")
+                if (t.source == "voice") sb.append(" [voice]")
+                sb.append(": ").append(t.text.take(300)).append('\n')
+            }
+        }
+        return sb.toString()
+    }
+}
