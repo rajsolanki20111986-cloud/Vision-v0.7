@@ -108,3 +108,106 @@ class LiveSession(
                 sc.optJSONObject("inputTranscription")?.optString("text")?.takeIf { it.isNotEmpty() }?.let {
                     flushModel()
                     userBuf.append(it)
+                    onCaption(it, true)
+                }
+                sc.optJSONObject("outputTranscription")?.optString("text")?.takeIf { it.isNotEmpty() }?.let {
+                    flushUser()
+                    modelBuf.append(it)
+                    onCaption(it, false)
+                }
+                if (sc.optBoolean("turnComplete")) {
+                    flushTurns()
+                    onState(LiveState.Listening)
+                }
+            }
+
+            m.optJSONObject("toolCall")?.optJSONArray("functionCalls")?.let { runTools(it) }
+        }
+    }
+
+    private fun flushUser() {
+        val t = userBuf.toString().trim()
+        userBuf.setLength(0)
+        if (t.isNotEmpty()) MemoryStore.addTurn("voice", true, t)
+    }
+
+    private fun flushModel() {
+        val t = modelBuf.toString().trim()
+        modelBuf.setLength(0)
+        if (t.isNotEmpty()) MemoryStore.addTurn("voice", false, t)
+    }
+
+    private fun flushTurns() {
+        flushUser()
+        flushModel()
+    }
+
+    private fun runTools(calls: JSONArray) {
+        scope.launch {
+            val out = JSONArray()
+            val executed = HashSet<String>()
+            for (i in 0 until calls.length()) {
+                val c = calls.getJSONObject(i)
+                val name = c.optString("name")
+                val args = c.optJSONObject("args") ?: JSONObject()
+                // Models can occasionally repeat a function call in one response. Never execute
+                // an identical action twice; return a harmless explanation for the duplicate.
+                val fingerprint = name + ":" + args.toString()
+                if (!executed.add(fingerprint)) {
+                    out.put(JSONObject().put("id", c.getString("id"))
+                        .put("name", name)
+                        .put("response", JSONObject().put("result", "Skipped duplicate tool call in this turn.")))
+                    continue
+                }
+                var result = try {
+                    ToolRouter.run(ctx, name, args)
+                } catch (e: Exception) {
+                    "error: ${e.message}"
+                }
+                if (result.startsWith("IMG:")) {
+                    // Screenshots go to the Live model as a video frame; the tool result just confirms it.
+                    ws?.send(JSONObject().put("realtimeInput", JSONObject().put("video", JSONObject()
+                        .put("mimeType", "image/jpeg")
+                        .put("data", result.removePrefix("IMG:")))).toString())
+                    result = "Screenshot sent to you as an image. Describe what you see."
+                }
+                out.put(JSONObject()
+                    .put("id", c.getString("id"))
+                    .put("name", name)
+                    .put("response", JSONObject().put("result", result)))
+            }
+            ws?.send(JSONObject().put("toolResponse", JSONObject().put("functionResponses", out)).toString())
+        }
+    }
+
+    /** Announces each new phone notification; drop(1) skips the value that was already there. */
+    private fun startNotificationFeed() {
+        if (notifyJob != null || !Prefs.notifyAlerts) return
+        notifyJob = scope.launch {
+            VisionNotificationListener.newMessage.drop(1).filterNotNull().collect { msg ->
+                sendText("[Phone notification] ${msg.app}: ${msg.sender} wrote: ${msg.text}. " +
+                    "Tell him briefly and ask if he wants to reply.")
+            }
+        }
+    }
+
+    private fun sendText(text: String) {
+        // gemini-3.1-flash-live accepts clientContent only to seed history; text during a session goes as realtimeInput.
+        ws?.send(JSONObject().put("realtimeInput", JSONObject().put("text", text)).toString())
+    }
+
+    fun stop() {
+        ws?.close(1000, "bye")
+        shutdown()
+    }
+
+    private fun shutdown() {
+        if (closed) return
+        closed = true
+        flushTurns()
+        MemoryKeeper.maybeRun(force = true)
+        audio.stop()
+        scope.cancel()
+        onState(LiveState.Disconnected)
+    }
+}
