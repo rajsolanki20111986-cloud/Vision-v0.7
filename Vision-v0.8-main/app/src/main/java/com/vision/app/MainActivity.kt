@@ -258,3 +258,103 @@ class ChatVM : ViewModel() {
 
 fun speak(tts: TextToSpeech?, text: String) {
     tts ?: return
+    tts.language = if (LanguageDetector.detectLanguage(text) == "hi") Locale("hi", "IN") else Locale.US
+    tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "msg")
+}
+
+@Composable
+fun ChatScreen(vm: ChatVM = viewModel()) {
+    val ctx = LocalContext.current
+    var input by remember { mutableStateOf("") }
+    val ttsRef = remember { arrayOfNulls<TextToSpeech>(1) }
+    DisposableEffect(Unit) {
+        val t = TextToSpeech(ctx) { s -> if (s == TextToSpeech.SUCCESS) ttsRef[0]?.language = Locale.US }
+        ttsRef[0] = t
+        onDispose { t.shutdown() }
+    }
+    LaunchedEffect(Unit) { vm.reload() }
+
+    Column(Modifier.fillMaxSize()) {
+        LazyColumn(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+            items(vm.msgs) { t ->
+                Column(
+                    Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    horizontalAlignment = if (t.user) Alignment.End else Alignment.Start
+                ) {
+                    Text(
+                        (if (t.source == "voice") "🎙 " else "") + t.text,
+                        color = if (t.user) Color.White else Color.Black,
+                        modifier = Modifier.clip(RoundedCornerShape(14.dp))
+                            .background(if (t.user) BUBBLE_USER else BUBBLE_VISION)
+                            .padding(12.dp)
+                    )
+                    if (!t.user) Text(
+                        "🔊",
+                        modifier = Modifier.clickable { speak(ttsRef[0], t.text) }.padding(6.dp)
+                    )
+                }
+            }
+            if (vm.busy) item { Text("…", color = GREY) }
+        }
+        Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                input, { input = it }, Modifier.weight(1f),
+                placeholder = { Text("Message") }, maxLines = 4
+            )
+            Text("🎤", fontSize = 26.sp, modifier = Modifier.clickable { listen(ctx) { input = it } }.padding(8.dp))
+            Text(
+                "➤", fontSize = 26.sp, color = BLUE,
+                modifier = Modifier.clickable { vm.send(ctx.applicationContext, input); input = "" }.padding(8.dp)
+            )
+        }
+    }
+}
+
+fun listen(ctx: Context, onText: (String) -> Unit) {
+    if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return
+    if (!SpeechRecognizer.isRecognitionAvailable(ctx)) {
+        Toast.makeText(ctx, "Speech recognition unavailable", Toast.LENGTH_SHORT).show(); return
+    }
+    val sr = SpeechRecognizer.createSpeechRecognizer(ctx)
+    sr.setRecognitionListener(object : RecognitionListener {
+        override fun onResults(r: Bundle?) {
+            r?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let(onText)
+            sr.destroy()
+        }
+        override fun onError(error: Int) { sr.destroy() }
+        override fun onReadyForSpeech(p: Bundle?) {}
+        override fun onBeginningOfSpeech() {}
+        override fun onRmsChanged(v: Float) {}
+        override fun onBufferReceived(b: ByteArray?) {}
+        override fun onEndOfSpeech() {}
+        override fun onPartialResults(p: Bundle?) {}
+        override fun onEvent(t: Int, p: Bundle?) {}
+    })
+    sr.startListening(
+        Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+            .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            .putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hi-IN")
+    )
+}
+
+// ---------------------------------------------------------------- Settings
+
+@Composable
+fun ToggleRow(title: String, sub: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title)
+            Text(sub, fontSize = 12.sp, color = GREY)
+        }
+        Switch(checked = checked, onCheckedChange = onChange)
+    }
+}
+
+@Composable
+fun SettingsScreen() {
+    val ctx = LocalContext.current
+    var key by remember { mutableStateOf(Prefs.apiKey) }
+    var voice by remember { mutableStateOf(Prefs.voice) }
+    var control by remember { mutableStateOf(Prefs.controlEnabled) }
+    var memory by remember { mutableStateOf(Prefs.memoryOn) }
+    var notify by remember { mutableStateOf(Prefs.notifyAlerts) }
